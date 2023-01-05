@@ -6194,6 +6194,90 @@ QuicConnParamSet(
         Status = QUIC_STATUS_SUCCESS;
         break;
     }
+    case QUIC_PARAM_CONN_ADD_LOCAL_ADDRESS: {
+
+        if (BufferLength != sizeof(QUIC_ADDR)) {
+            Status = QUIC_STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        if (Connection->State.ClosedLocally || QuicConnIsServer(Connection)) {
+            Status = QUIC_STATUS_INVALID_STATE;
+            break;
+        }
+
+        if (Connection->State.Started &&
+            !Connection->State.HandshakeConfirmed) {
+            Status = QUIC_STATUS_INVALID_STATE;
+            break;
+        }
+
+        const QUIC_ADDR* LocalAddress = (const QUIC_ADDR*)Buffer;
+
+        if (!QuicAddrIsValid(LocalAddress)) {
+            Status = QUIC_STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        QUIC_PATH* NewPath = &Connection->Paths[Connection->PathsCount++];
+        QuicPathInitialize(Connection, NewPath);
+
+        CxPlatCopyMemory(&NewPath->Route.LocalAddress, Buffer, sizeof(QUIC_ADDR));
+        QuicTraceEvent(
+            ConnLocalAddrAdded,
+            "[conn][%p] New Local IP: %!ADDR!",
+            Connection,
+            CASTED_CLOG_BYTEARRAY(sizeof(NewPath->Route.LocalAddress), &NewPath->Route.LocalAddress));
+
+        CXPLAT_DBG_ASSERT(Connection->State.RemoteAddressSet);
+        CXPLAT_DBG_ASSERT(Connection->Configuration != NULL);
+
+        CXPLAT_UDP_CONFIG UdpConfig = {0};
+        UdpConfig.LocalAddress = LocalAddress;
+        UdpConfig.RemoteAddress = &Connection->Paths[0].Route.RemoteAddress;
+        UdpConfig.Flags = Connection->State.ShareBinding ? CXPLAT_SOCKET_FLAG_SHARE : 0;
+        UdpConfig.InterfaceIndex = 0;
+#ifdef QUIC_COMPARTMENT_ID
+        UdpConfig.CompartmentId = Connection->Configuration->CompartmentId;
+#endif
+#ifdef QUIC_OWNING_PROCESS
+        UdpConfig.OwningProcess = Connection->Configuration->OwningProcess;
+#endif
+
+        Status =
+            QuicLibraryGetBinding(
+                &UdpConfig,
+                &NewPath->Binding);
+        if (QUIC_FAILED(Status)) {
+            // TODO - Add log for failure.
+            Status = QUIC_STATUS_INVALID_STATE;
+            break;
+        }
+        NewPath->Route.Queue = NULL;
+
+        NewPath->DestCid = QuicConnGetUnusedDestCid(Connection);
+        QUIC_CID_SET_PATH(Connection, NewPath->DestCid, NewPath);
+        NewPath->DestCid->CID.UsedLocally = TRUE;
+        // TODO - If we're sharing the binding, should we add src cid as well?
+        // QuicBindingAddSourceConnectionID(NewPath->Binding, SrcCid);
+
+        // QuicPathValidate(NewPath);
+
+        QuicBindingGetLocalAddress(
+            NewPath->Binding,
+            &NewPath->Route.LocalAddress);
+
+        QuicTraceEvent(
+            ConnLocalAddrAdded,
+            "[conn][%p] New Local IP: %!ADDR!",
+            Connection,
+            CASTED_CLOG_BYTEARRAY(sizeof(NewPath->Route.LocalAddress), &NewPath->Route.LocalAddress));
+
+        QuicSendSetSendFlag(&Connection->Send, QUIC_CONN_SEND_FLAG_PING);
+
+        Status = QUIC_STATUS_SUCCESS;
+        break;
+    }
 
     case QUIC_PARAM_CONN_REMOTE_ADDRESS:
 
