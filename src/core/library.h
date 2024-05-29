@@ -302,19 +302,13 @@ QuicLibraryGetCurrentPartition(
     )
 {
     CXPLAT_DBG_ASSERT(MsQuicLib.PerProc != NULL);
-    const uint16_t CurrentProc = (uint16_t)CxPlatProcCurrentNumber();
+    static uint16_t CurrentProc = 0;
+    CurrentProc++;
     if (MsQuicLib.ExecutionConfig && MsQuicLib.ExecutionConfig->ProcessorCount) {
-        CXPLAT_DBG_ASSERT(MsQuicLib.ExecutionConfig->ProcessorList);
-        //
-        // Try to find a partition close to the current processor.
-        //
-        for (uint32_t i = 0; i < MsQuicLib.ExecutionConfig->ProcessorCount; ++i) {
-            if (CurrentProc <= MsQuicLib.ExecutionConfig->ProcessorList[i]) {
-                return (uint16_t)i;
-            }
-        }
-        return (uint16_t)MsQuicLib.ExecutionConfig->ProcessorCount - 1;
+        CurrentProc %= MsQuicLib.ExecutionConfig->ProcessorCount;
+        return CurrentProc % MsQuicLib.ExecutionConfig->ProcessorCount;
     }
+    CurrentProc %= MsQuicLib.PartitionCount;
     return CurrentProc % MsQuicLib.PartitionCount;
 }
 
