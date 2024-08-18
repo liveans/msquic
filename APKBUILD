@@ -9,8 +9,8 @@ arch="x86_64 armhf aarch64"
 license="MIT"
 depends="openssl numactl"
 subpackages="$pkgname-dev $pkgname-doc"
-source="version.json"
-builddir="$srcdir/.."
+source="src/"
+builddir="$srcdir/../"
 
 prepare() {
         # Install dependencies
@@ -54,6 +54,3 @@ package() {
         mkdir -p "$pkgdir"
         cmake --install build/linux/Release_openssl3 --prefix $pkgdir
 }
-sha512sums="
-ab9c24c66e8ce144d966cb65d586753ca5b8110d7f7188573e9a0ee02453fab23970e7c7ee5e5bec75252af07eb67f01ba158c7a62f950f3661d77590d646451  version.json
-"
