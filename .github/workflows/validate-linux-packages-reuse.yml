@@ -1,0 +1,276 @@
+name: Validate Linux Packages (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      package_version:
+        description: 'Package version to validate (empty for latest)'
+        required: false
+        default: ''
+        type: string
+      config:
+        description: 'Build configuration'
+        required: false
+        default: 'Release'
+        type: string
+      tls:
+        description: 'TLS provider'
+        required: false
+        default: 'quictls'
+        type: string
+      skip_dotnet_tests:
+        description: 'Skip .NET QUIC tests'
+        required: false
+        default: false
+        type: boolean
+      testing_repo:
+        description: 'Use testing/preview packages'
+        required: false
+        default: false
+        type: boolean
+
+permissions: read-all
+
+jobs:
+  # Job 1: Build msquictest for all architectures
+  build-test-artifacts:
+    name: Build Test (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/microsoft/msquic/linux-build-xcomp:ubuntu-24.04-cross
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64, arm]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build msquictest
+        shell: pwsh
+        run: |
+          ./scripts/build.ps1 -Platform linux -Arch ${{ matrix.arch }} -Tls ${{ inputs.tls }} -Config ${{ inputs.config }} -DisablePerf
+
+      - name: Upload Test Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-artifacts-${{ matrix.arch }}
+          path: |
+            artifacts/bin/linux/${{ matrix.arch }}_${{ inputs.config }}_${{ inputs.tls }}/msquictest
+            artifacts/bin/linux/${{ matrix.arch }}_${{ inputs.config }}_${{ inputs.tls }}/libmsquic.so*
+          retention-days: 1
+
+  # Job 2: Build .NET test application
+  build-dotnet-test:
+    name: Build .NET Test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0'
+
+      - name: Build QuicHello
+        run: |
+          cd src/cs/QuicSimpleTest
+          # Build for all architectures (framework-dependent)
+          dotnet publish QuicHello.net9.0.csproj -c Release -o ../../../dotnet-artifacts/x64 -r linux-x64 --self-contained false
+          dotnet publish QuicHello.net9.0.csproj -c Release -o ../../../dotnet-artifacts/arm64 -r linux-arm64 --self-contained false
+          dotnet publish QuicHello.net9.0.csproj -c Release -o ../../../dotnet-artifacts/arm -r linux-arm --self-contained false
+
+      - name: Upload .NET Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-test-artifacts
+          path: dotnet-artifacts/
+          retention-days: 1
+
+  # Job 3: Validate packages across all distro/arch combinations
+  validate-packages:
+    name: ${{ matrix.friendlyName }}
+    needs: [build-test-artifacts, build-dotnet-test]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 (DEB)
+          - { friendlyName: "Ubuntu 22.04 x64", distro: ubuntu_22_04, arch: x64, platform: "linux/amd64", image: "ubuntu:22.04", type: deb, pkg_arch: amd64 }
+          - { friendlyName: "Ubuntu 22.04 arm64", distro: ubuntu_22_04, arch: arm64, platform: "linux/arm64", image: "ubuntu:22.04", type: deb, pkg_arch: arm64 }
+          - { friendlyName: "Ubuntu 22.04 arm32", distro: ubuntu_22_04, arch: arm, platform: "linux/arm/v7", image: "ubuntu:22.04", type: deb, pkg_arch: armhf }
+
+          # Ubuntu 24.04 (DEB)
+          - { friendlyName: "Ubuntu 24.04 x64", distro: ubuntu_24_04, arch: x64, platform: "linux/amd64", image: "ubuntu:24.04", type: deb, pkg_arch: amd64 }
+          - { friendlyName: "Ubuntu 24.04 arm64", distro: ubuntu_24_04, arch: arm64, platform: "linux/arm64", image: "ubuntu:24.04", type: deb, pkg_arch: arm64 }
+          - { friendlyName: "Ubuntu 24.04 arm32", distro: ubuntu_24_04, arch: arm, platform: "linux/arm/v7", image: "ubuntu:24.04", type: deb, pkg_arch: armhf }
+
+          # Ubuntu 25.10 (DEB) - NOTE: Image may not exist yet
+          # - { friendlyName: "Ubuntu 25.10 x64", distro: ubuntu_25_10, arch: x64, platform: "linux/amd64", image: "ubuntu:25.10", type: deb, pkg_arch: amd64 }
+          # - { friendlyName: "Ubuntu 25.10 arm64", distro: ubuntu_25_10, arch: arm64, platform: "linux/arm64", image: "ubuntu:25.10", type: deb, pkg_arch: arm64 }
+          # - { friendlyName: "Ubuntu 25.10 arm32", distro: ubuntu_25_10, arch: arm, platform: "linux/arm/v7", image: "ubuntu:25.10", type: deb, pkg_arch: armhf }
+
+          # Debian 12 (DEB)
+          - { friendlyName: "Debian 12 x64", distro: debian_12, arch: x64, platform: "linux/amd64", image: "debian:12", type: deb, pkg_arch: amd64 }
+          - { friendlyName: "Debian 12 arm64", distro: debian_12, arch: arm64, platform: "linux/arm64", image: "debian:12", type: deb, pkg_arch: arm64 }
+          - { friendlyName: "Debian 12 arm32", distro: debian_12, arch: arm, platform: "linux/arm/v7", image: "debian:12", type: deb, pkg_arch: armhf }
+
+          # Debian 13 (DEB)
+          - { friendlyName: "Debian 13 x64", distro: debian_13, arch: x64, platform: "linux/amd64", image: "debian:trixie", type: deb, pkg_arch: amd64 }
+          - { friendlyName: "Debian 13 arm64", distro: debian_13, arch: arm64, platform: "linux/arm64", image: "debian:trixie", type: deb, pkg_arch: arm64 }
+          - { friendlyName: "Debian 13 arm32", distro: debian_13, arch: arm, platform: "linux/arm/v7", image: "debian:trixie", type: deb, pkg_arch: armhf }
+
+          # Azure Linux 3.0 (RPM) - No arm32 support
+          - { friendlyName: "Azure Linux 3.0 x64", distro: azurelinux_3_0, arch: x64, platform: "linux/amd64", image: "mcr.microsoft.com/azurelinux/base/core:3.0", type: rpm, pkg_arch: x86_64 }
+          - { friendlyName: "Azure Linux 3.0 arm64", distro: azurelinux_3_0, arch: arm64, platform: "linux/arm64", image: "mcr.microsoft.com/azurelinux/base/core:3.0", type: rpm, pkg_arch: aarch64 }
+
+          # CentOS Stream 9 (RPM) - No arm32 support
+          - { friendlyName: "CentOS Stream 9 x64", distro: centos_stream_9, arch: x64, platform: "linux/amd64", image: "quay.io/centos/centos:stream9", type: rpm, pkg_arch: x86_64 }
+          - { friendlyName: "CentOS Stream 9 arm64", distro: centos_stream_9, arch: arm64, platform: "linux/arm64", image: "quay.io/centos/centos:stream9", type: rpm, pkg_arch: aarch64 }
+
+          # CentOS Stream 10 (RPM) - No arm32 support
+          - { friendlyName: "CentOS Stream 10 x64", distro: centos_stream_10, arch: x64, platform: "linux/amd64", image: "quay.io/centos/centos:stream10", type: rpm, pkg_arch: x86_64 }
+          - { friendlyName: "CentOS Stream 10 arm64", distro: centos_stream_10, arch: arm64, platform: "linux/arm64", image: "quay.io/centos/centos:stream10", type: rpm, pkg_arch: aarch64 }
+
+          # RHEL 9 (RPM) - Using UBI images, no arm32 support
+          - { friendlyName: "RHEL 9 x64", distro: rhel_9, arch: x64, platform: "linux/amd64", image: "registry.access.redhat.com/ubi9/ubi:latest", type: rpm, pkg_arch: x86_64 }
+          - { friendlyName: "RHEL 9 arm64", distro: rhel_9, arch: arm64, platform: "linux/arm64", image: "registry.access.redhat.com/ubi9/ubi:latest", type: rpm, pkg_arch: aarch64 }
+
+          # RHEL 10 (RPM) - Using UBI images, no arm32 support
+          # - { friendlyName: "RHEL 10 x64", distro: rhel_10, arch: x64, platform: "linux/amd64", image: "registry.access.redhat.com/ubi10/ubi:latest", type: rpm, pkg_arch: x86_64 }
+          # - { friendlyName: "RHEL 10 arm64", distro: rhel_10, arch: arm64, platform: "linux/arm64", image: "registry.access.redhat.com/ubi10/ubi:latest", type: rpm, pkg_arch: aarch64 }
+
+          # Fedora 42 (RPM)
+          - { friendlyName: "Fedora 42 x64", distro: fedora_42, arch: x64, platform: "linux/amd64", image: "fedora:42", type: rpm, pkg_arch: x86_64 }
+          - { friendlyName: "Fedora 42 arm64", distro: fedora_42, arch: arm64, platform: "linux/arm64", image: "fedora:42", type: rpm, pkg_arch: aarch64 }
+
+          # Fedora 43 (RPM)
+          # - { friendlyName: "Fedora 43 x64", distro: fedora_43, arch: x64, platform: "linux/amd64", image: "fedora:43", type: rpm, pkg_arch: x86_64 }
+          # - { friendlyName: "Fedora 43 arm64", distro: fedora_43, arch: arm64, platform: "linux/arm64", image: "fedora:43", type: rpm, pkg_arch: aarch64 }
+
+          # openSUSE Leap 15.6 (RPM) - No arm32 support
+          - { friendlyName: "openSUSE 15.6 x64", distro: opensuse_15_6, arch: x64, platform: "linux/amd64", image: "opensuse/leap:15.6", type: rpm, pkg_arch: x86_64 }
+          - { friendlyName: "openSUSE 15.6 arm64", distro: opensuse_15_6, arch: arm64, platform: "linux/arm64", image: "opensuse/leap:15.6", type: rpm, pkg_arch: aarch64 }
+
+          # openSUSE Tumbleweed (for 16.0) - No arm32 support
+          - { friendlyName: "openSUSE 16.0 x64", distro: opensuse_16_0, arch: x64, platform: "linux/amd64", image: "opensuse/tumbleweed:latest", type: rpm, pkg_arch: x86_64 }
+          - { friendlyName: "openSUSE 16.0 arm64", distro: opensuse_16_0, arch: arm64, platform: "linux/arm64", image: "opensuse/tumbleweed:latest", type: rpm, pkg_arch: aarch64 }
+
+          # SLES 15.6 (RPM) - No arm32 support
+          - { friendlyName: "SLES 15.6 x64", distro: sles_15_6, arch: x64, platform: "linux/amd64", image: "registry.suse.com/suse/sle15:15.6", type: rpm, pkg_arch: x86_64 }
+          - { friendlyName: "SLES 15.6 arm64", distro: sles_15_6, arch: arm64, platform: "linux/arm64", image: "registry.suse.com/suse/sle15:15.6", type: rpm, pkg_arch: aarch64 }
+
+          # SLES 15.7 (RPM) - No arm32 support
+          - { friendlyName: "SLES 15.7 x64", distro: sles_15_7, arch: x64, platform: "linux/amd64", image: "registry.suse.com/suse/sle15:15.7", type: rpm, pkg_arch: x86_64 }
+          - { friendlyName: "SLES 15.7 arm64", distro: sles_15_7, arch: arm64, platform: "linux/arm64", image: "registry.suse.com/suse/sle15:15.7", type: rpm, pkg_arch: aarch64 }
+
+          # SLES 16 (RPM) - Using BCI base, no arm32 support
+          - { friendlyName: "SLES 16 x64", distro: sles_16, arch: x64, platform: "linux/amd64", image: "registry.suse.com/bci/bci-base:latest", type: rpm, pkg_arch: x86_64 }
+          - { friendlyName: "SLES 16 arm64", distro: sles_16, arch: arm64, platform: "linux/arm64", image: "registry.suse.com/bci/bci-base:latest", type: rpm, pkg_arch: aarch64 }
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        if: matrix.arch != 'x64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Download Test Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: test-artifacts-${{ matrix.arch }}
+          path: artifacts
+
+      - name: Download .NET Artifacts
+        if: ${{ !inputs.skip_dotnet_tests }}
+        uses: actions/download-artifact@v4
+        with:
+          name: dotnet-test-artifacts
+          path: dotnet-artifacts
+
+      - name: Download Package
+        shell: bash
+        run: |
+          chmod +x scripts/download-package.sh
+          ./scripts/download-package.sh \
+            --distro "${{ matrix.distro }}" \
+            --arch "${{ matrix.pkg_arch }}" \
+            --type "${{ matrix.type }}" \
+            --version "${{ inputs.package_version }}" \
+            --testing "${{ inputs.testing_repo }}" \
+            --output packages/
+
+      - name: List Downloaded Files
+        run: |
+          echo "=== Packages ==="
+          ls -la packages/ || echo "No packages directory"
+          echo ""
+          echo "=== Artifacts ==="
+          ls -la artifacts/ || echo "No artifacts directory"
+          echo ""
+          echo "=== .NET Artifacts ==="
+          ls -la dotnet-artifacts/${{ matrix.arch }}/ || echo "No .NET artifacts"
+
+      - name: Run Validation in Docker
+        shell: bash
+        run: |
+          chmod +x scripts/validate-package-docker.sh
+          chmod +x artifacts/msquictest 2>/dev/null || true
+
+          # Build docker run command
+          DOCKER_ARGS="--rm --platform ${{ matrix.platform }}"
+          DOCKER_ARGS="$DOCKER_ARGS -v $(pwd)/packages:/packages:ro"
+          DOCKER_ARGS="$DOCKER_ARGS -v $(pwd)/artifacts:/artifacts:ro"
+          DOCKER_ARGS="$DOCKER_ARGS -v $(pwd)/scripts:/scripts:ro"
+
+          # Add .NET artifacts if not skipping
+          if [ "${{ inputs.skip_dotnet_tests }}" != "true" ]; then
+            DOCKER_ARGS="$DOCKER_ARGS -v $(pwd)/dotnet-artifacts/${{ matrix.arch }}:/dotnet:ro"
+          fi
+
+          echo "Running Docker container: ${{ matrix.image }}"
+          echo "Platform: ${{ matrix.platform }}"
+
+          docker run $DOCKER_ARGS ${{ matrix.image }} \
+            /scripts/validate-package-docker.sh \
+              "${{ matrix.type }}" \
+              "${{ matrix.arch }}" \
+              "${{ inputs.skip_dotnet_tests }}" \
+              "${{ inputs.config }}" \
+              "${{ inputs.tls }}"
+
+      - name: Upload Logs on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.distro }}-${{ matrix.arch }}
+          path: |
+            packages/
+            artifacts/
+
+  # Job 4: Summary
+  summary:
+    name: Validation Summary
+    if: always()
+    needs: [validate-packages]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "## Linux Package Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Package Version**: ${{ inputs.package_version || 'latest' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Testing Repo**: ${{ inputs.testing_repo }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Skip .NET Tests**: ${{ inputs.skip_dotnet_tests }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Check the individual job results above for detailed status of each distro/arch combination." >> $GITHUB_STEP_SUMMARY
+
+      - name: Check Status
+        uses: re-actors/alls-green@v1
+        with:
+          jobs: ${{ toJSON(needs) }}
